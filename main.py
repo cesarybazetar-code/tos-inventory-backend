@@ -263,5 +263,8 @@ def auto_po(storage_area: Optional[str] = None, db: Session = Depends(get_db)):
             })
     return {"storage_area": storage_area, "lines": out}
 
+from main_ocr import app as ocr_app  # make sure file is committed
+app.mount("/", ocr_app)  # merges OCR endpoints with your API
+
 if __name__ == "__main__":
     create_db()
