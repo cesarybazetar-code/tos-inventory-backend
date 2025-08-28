@@ -1,4 +1,3 @@
-
 import os
 from datetime import date
 from typing import Optional, List, Dict
@@ -53,7 +52,7 @@ def create_db():
     Base.metadata.create_all(bind=engine)
 
 # ---- App ----
-app = FastAPI(title="TOS Inventory API", version="1.1.0")
+app = FastAPI(title="TOS Inventory API", version="1.1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,7 +84,7 @@ class ItemOut(BaseModel):
     inv_unit_price: float = 0.0
     active: bool = True
     class Config:
-        orm_mode = True
+        from_attributes = True  # pydantic v2 (replaces orm_mode=True)
 
 class ItemCreate(BaseModel):
     name: str
@@ -104,7 +103,7 @@ class CountOut(BaseModel):
     storage_area: Optional[str] = None
     lines: List[CountLineIn] = []
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class CountCreate(BaseModel):
     storage_area: Optional[str] = None
@@ -119,6 +118,7 @@ def startup_event():
 def health():
     return {"ok": True}
 
+# ---------- Items (Catalog) ----------
 @app.get("/items", response_model=List[ItemOut])
 def list_items(
     q: Optional[str] = None,
@@ -178,6 +178,37 @@ def update_item(item_id: int, payload: ItemCreate, db: Session = Depends(get_db)
     db.commit(); db.refresh(rec)
     return rec
 
+# NEW: partial update for easier editing from UI
+@app.patch("/items/{item_id}", response_model=ItemOut, dependencies=[Depends(require_admin)])
+def patch_item(item_id: int, payload: ItemCreate, db: Session = Depends(get_db)):
+    rec = db.query(Item).get(item_id)
+    if not rec:
+        raise HTTPException(404, "Not found")
+
+    # Compute new name/area while checking conflicts
+    new_name = rec.name if not payload.name else payload.name.strip()
+    new_area = rec.storage_area if payload.storage_area is None else (payload.storage_area or None)
+    if (new_name != rec.name) or (new_area != rec.storage_area):
+        conflict = db.query(Item).filter(
+            Item.name == new_name,
+            Item.storage_area == new_area,
+            Item.id != rec.id
+        ).first()
+        if conflict:
+            raise HTTPException(400, "Item with same name exists in that area")
+
+    rec.name = new_name
+    rec.storage_area = new_area
+    if payload.par is not None:
+        rec.par = payload.par or 0.0
+    if payload.inv_unit_price is not None:
+        rec.inv_unit_price = payload.inv_unit_price or 0.0
+    if payload.active is not None:
+        rec.active = bool(payload.active)
+
+    db.commit(); db.refresh(rec)
+    return rec
+
 @app.delete("/items/{item_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_item(item_id: int, db: Session = Depends(get_db)):
     rec = db.query(Item).get(item_id)
@@ -186,6 +217,7 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
     db.delete(rec); db.commit()
     return None
 
+# ---------- Catalog CSV Import (optional) ----------
 @app.post("/import/catalog", status_code=201, dependencies=[Depends(require_admin)])
 async def import_catalog(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.endswith(".csv"):
@@ -215,6 +247,7 @@ async def import_catalog(file: UploadFile = File(...), db: Session = Depends(get
     db.commit()
     return {"created": created, "updated": updated}
 
+# ---------- Counts ----------
 @app.get("/counts", response_model=List[CountOut])
 def list_counts(db: Session = Depends(get_db)):
     res = []
@@ -233,6 +266,7 @@ def create_count(payload: CountCreate, db: Session = Depends(get_db)):
     db.commit(); db.refresh(c)
     return CountOut(id=c.id, count_date=c.count_date, storage_area=c.storage_area, lines=payload.lines)
 
+# ---------- Auto-PO ----------
 @app.get("/auto-po")
 def auto_po(storage_area: Optional[str] = None, db: Session = Depends(get_db)):
     latest = db.query(Count).filter(
@@ -263,6 +297,7 @@ def auto_po(storage_area: Optional[str] = None, db: Session = Depends(get_db)):
             })
     return {"storage_area": storage_area, "lines": out}
 
+# ---------- Mount OCR app ----------
 from main_ocr import app as ocr_app  # make sure file is committed
 app.mount("/", ocr_app)  # merges OCR endpoints with your API
 
