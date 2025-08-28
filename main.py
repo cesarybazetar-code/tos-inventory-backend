@@ -67,14 +67,14 @@ class Count(Base):
 
 class CountLine(Base):
     __tablename__ = "count_lines"
-    id = Column(Integer, primary key=True, index=True)
+    id = Column(Integer, primary_key=True, index=True)   # ✅ FIXED
     count_id = Column(Integer, ForeignKey("counts.id", ondelete="CASCADE"))
     item_id = Column(Integer, ForeignKey("items.id", ondelete="SET NULL"))
     qty = Column(Float, default=0.0)
 
     count = relationship("Count", backref="lines")
     item = relationship("Item")
-
+    
 class Receipt(Base):
     __tablename__ = "receipts"
     id = Column(Integer, primary_key=True, index=True)
