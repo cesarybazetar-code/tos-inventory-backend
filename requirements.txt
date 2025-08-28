@@ -3,3 +3,4 @@ fastapi
 sqlalchemy
 pydantic
 python-multipart
+requests
