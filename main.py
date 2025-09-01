@@ -1,10 +1,11 @@
-import os, re, csv, io
+# main.py
+import os, re, csv, io, base64
 from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict
 
 import requests
 from fastapi import (
-    FastAPI, UploadFile, File, HTTPException, Header, Depends, Query, APIRouter
+    FastAPI, UploadFile, File, HTTPException, Header, Depends, Query, APIRouter, Body
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -19,15 +20,12 @@ from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
 # -------------------- CONFIG --------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tos.db")
-# Optional “master key” for quick admin calls (keeps old UI working):
-ADMIN_KEY = os.getenv("ADMIN_KEY")
-# OCR.space API key
-OCR_API_KEY = os.getenv("OCR_API_KEY")
-
-# JWT settings (change SECRET_KEY in Render env for prod)
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-prod")
+ADMIN_KEY = os.getenv("ADMIN_KEY")                   # optional "master" header for bootstrap/admin
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me")    # set a long random value in Render
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24h
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24                # 24h
+GCV_API_KEY = os.getenv("GCV_API_KEY")               # Google Cloud Vision API key (recommended)
+OCR_API_KEY = os.getenv("OCR_API_KEY")               # OCR.space fallback (optional)
 
 engine = create_engine(
     DATABASE_URL,
@@ -46,7 +44,7 @@ class User(Base):
     email = Column(String, unique=True, nullable=False, index=True)
     name = Column(String, nullable=True)
     hashed_password = Column(String, nullable=False)
-    role = Column(String, default="viewer")  # admin, manager, viewer
+    role = Column(String, default="viewer")  # roles: admin, manager, counter, viewer
     active = Column(Boolean, default=True)
 
 class Item(Base):
@@ -67,14 +65,14 @@ class Count(Base):
 
 class CountLine(Base):
     __tablename__ = "count_lines"
-    id = Column(Integer, primary_key=True, index=True)   # ✅ FIXED
+    id = Column(Integer, primary_key=True, index=True)
     count_id = Column(Integer, ForeignKey("counts.id", ondelete="CASCADE"))
     item_id = Column(Integer, ForeignKey("items.id", ondelete="SET NULL"))
     qty = Column(Float, default=0.0)
 
     count = relationship("Count", backref="lines")
     item = relationship("Item")
-    
+
 class Receipt(Base):
     __tablename__ = "receipts"
     id = Column(Integer, primary_key=True, index=True)
@@ -93,11 +91,11 @@ def create_db():
     Base.metadata.create_all(bind=engine)
 
 # -------------------- APP --------------------
-app = FastAPI(title="TOS Inventory API", version="2.0.0")
+app = FastAPI(title="TOS Inventory API", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # lock down later if you want
+    allow_origins=["*"],            # lock down later to your frontend domain if you want
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -105,10 +103,8 @@ app.add_middleware(
 
 def get_db():
     db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    try: yield db
+    finally: db.close()
 
 # -------------------- AUTH HELPERS --------------------
 def get_password_hash(password: str) -> str:
@@ -123,44 +119,27 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
-    cred_err = HTTPException(401, "Invalid credentials")
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        uid = payload.get("sub")
-        if uid is None:
-            raise cred_err
-    except JWTError:
-        raise cred_err
-    user = db.query(User).get(int(uid))
-    if not user or not user.active:
-        raise cred_err
-    return user
-
 def get_user_optional(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> Optional[User]:
-    """Read Bearer token if present; otherwise return None (lets us support x-admin-key too)."""
+    """Return user from Bearer token if present; else None (x-admin-key can still work)."""
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
     token = authorization.split(" ", 1)[1].strip()
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         uid = payload.get("sub")
-        if not uid:
-            return None
+        if not uid: return None
         return db.query(User).get(int(uid))
     except Exception:
         return None
 
 def require_role_or_admin_key(allowed_roles: List[str]):
-    """Dependency: allow if (Bearer user has allowed role) OR x-admin-key matches ADMIN_KEY."""
+    """Allow if (Bearer user has allowed role) OR x-admin-key matches ADMIN_KEY."""
     def checker(
         user: Optional[User] = Depends(get_user_optional),
         x_admin_key: Optional[str] = Header(None)
     ):
-        # allow admin key if set & matches
         if ADMIN_KEY and x_admin_key == ADMIN_KEY:
             return True
-        # otherwise require user role
         if user and user.active and (user.role in allowed_roles):
             return True
         raise HTTPException(403, "Insufficient permissions")
@@ -173,8 +152,7 @@ class UserOut(BaseModel):
     name: Optional[str] = None
     role: str
     active: bool
-    class Config:
-        from_attributes = True
+    class Config: from_attributes = True
 
 class TokenOut(BaseModel):
     access_token: str
@@ -185,7 +163,13 @@ class RegisterIn(BaseModel):
     email: str
     password: str
     name: Optional[str] = None
-    role: str = "viewer"  # admin, manager, viewer
+    role: str = "viewer"  # admin, manager, counter, viewer
+
+class UpdateUserIn(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    active: Optional[bool] = None
+    new_password: Optional[str] = None
 
 class ItemOut(BaseModel):
     id: int
@@ -194,8 +178,7 @@ class ItemOut(BaseModel):
     par: float
     inv_unit_price: float
     active: bool
-    class Config:
-        from_attributes = True
+    class Config: from_attributes = True
 
 class ItemCreate(BaseModel):
     name: str
@@ -213,14 +196,12 @@ class CountOut(BaseModel):
     count_date: date
     storage_area: Optional[str] = None
     lines: List[CountLineIn] = []
-    class Config:
-        from_attributes = True
+    class Config: from_attributes = True
 
 class CountCreate(BaseModel):
     storage_area: Optional[str] = None
     lines: List[CountLineIn]
 
-# OCR schemas
 class ReceiveOCRIn(BaseModel):
     receiver: Optional[str] = None
     lines: List[Dict]
@@ -228,10 +209,10 @@ class ReceiveOCRIn(BaseModel):
 # -------------------- AUTH ROUTES --------------------
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 
-@auth_router.post("/register", response_model=UserOut, dependencies=[Depends(require_role_or_admin_key(["admin"]))])
+@auth_router.post("/register", response_model=UserOut,
+                  dependencies=[Depends(require_role_or_admin_key(["admin"]))])
 def register(payload: RegisterIn, db: Session = Depends(get_db)):
-    exists = db.query(User).filter(User.email == payload.email.lower()).first()
-    if exists:
+    if db.query(User).filter(User.email == payload.email.lower()).first():
         raise HTTPException(400, "Email already exists")
     u = User(
         email=payload.email.lower(),
@@ -256,6 +237,32 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 
 app.include_router(auth_router)
 
+# -------------------- USER ADMIN ROUTES (admin only) --------------------
+admin_router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_role_or_admin_key(["admin"]))])
+
+@admin_router.get("/users", response_model=List[UserOut])
+def list_users(db: Session = Depends(get_db)):
+    return db.query(User).order_by(User.id.asc()).all()
+
+@admin_router.put("/users/{user_id}", response_model=UserOut)
+def update_user(user_id: int, payload: UpdateUserIn, db: Session = Depends(get_db)):
+    u = db.query(User).get(user_id)
+    if not u: raise HTTPException(404, "User not found")
+    if payload.name is not None:
+        u.name = payload.name
+    if payload.role is not None:
+        if payload.role not in ("admin", "manager", "counter", "viewer"):
+            raise HTTPException(400, "Invalid role")
+        u.role = payload.role
+    if payload.active is not None:
+        u.active = bool(payload.active)
+    if payload.new_password:
+        u.hashed_password = get_password_hash(payload.new_password)
+    db.commit(); db.refresh(u)
+    return u
+
+app.include_router(admin_router)
+
 # -------------------- INVENTORY ROUTES --------------------
 @app.on_event("startup")
 def startup_event():
@@ -270,7 +277,6 @@ def list_items(
     q: Optional[str] = None,
     area: Optional[str] = Query(None, description="Filter by storage_area"),
     db: Session = Depends(get_db),
-    user: Optional[User] = Depends(get_user_optional),  # optional read
 ):
     qry = db.query(Item).filter(Item.active == True)
     if q:
@@ -286,8 +292,9 @@ def create_item(payload: ItemCreate, db: Session = Depends(get_db)):
     area = payload.storage_area or None
     exists = db.query(Item).filter(Item.name == name, Item.storage_area == area).first()
     if exists:
-        exists.par = payload.par or exists.par or 0.0
-        exists.inv_unit_price = payload.inv_unit_price or exists.inv_unit_price or 0.0
+        # upsert behavior
+        exists.par = payload.par if payload.par is not None else (exists.par or 0.0)
+        exists.inv_unit_price = payload.inv_unit_price if payload.inv_unit_price is not None else (exists.inv_unit_price or 0.0)
         exists.active = bool(payload.active) if payload.active is not None else True
         db.commit(); db.refresh(exists)
         return exists
@@ -375,7 +382,7 @@ def list_counts(db: Session = Depends(get_db)):
     return res
 
 @app.post("/counts", response_model=CountOut, status_code=201,
-          dependencies=[Depends(require_role_or_admin_key(["admin", "manager"]))])
+          dependencies=[Depends(require_role_or_admin_key(["admin", "manager", "counter"]))])
 def create_count(payload: CountCreate, db: Session = Depends(get_db)):
     c = Count(storage_area=payload.storage_area or None)
     db.add(c); db.commit(); db.refresh(c)
@@ -435,7 +442,7 @@ def fuzzy_match(items, text):
 
 @app.get("/ocr/health")
 def ocr_health():
-    return {"ok": True, "ocr": bool(OCR_API_KEY)}
+    return {"ok": True, "gcv": bool(GCV_API_KEY), "ocrspace": bool(OCR_API_KEY)}
 
 @app.post("/invoice/ocr", dependencies=[Depends(require_role_or_admin_key(["admin","manager"]))])
 async def ocr_invoice(
@@ -443,21 +450,43 @@ async def ocr_invoice(
     receiver: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    if not OCR_API_KEY:
-        raise HTTPException(400, "OCR_API_KEY not set on server")
+    text = ""
+    if GCV_API_KEY:
+        img_bytes = await file.read()
+        img_b64 = base64.b64encode(img_bytes).decode("ascii")
+        gcv_payload = {
+            "requests": [{
+                "image": {"content": img_b64},
+                "features": [{"type": "TEXT_DETECTION"}]
+            }]
+        }
+        resp = requests.post(
+            f"https://vision.googleapis.com/v1/images:annotate?key={GCV_API_KEY}",
+            json=gcv_payload, timeout=90
+        )
+        if resp.status_code != 200:
+            raise HTTPException(502, f"GCV error {resp.status_code}")
+        data = resp.json()
+        text = data["responses"][0].get("fullTextAnnotation", {}).get("text", "") or ""
+    elif OCR_API_KEY:
+        resp = requests.post(
+            "https://api.ocr.space/parse/image",
+            files={"file": (file.filename, await file.read())},
+            data={"apikey": OCR_API_KEY, "language": "eng", "scale": "true", "OCREngine": "2"},
+            timeout=90
+        )
+        if resp.status_code != 200:
+            raise HTTPException(502, f"OCR.space error {resp.status_code}")
+        payload = resp.json()
+        text = "\n".join([p.get("ParsedText","") for p in payload.get("ParsedResults",[])])
+    else:
+        raise HTTPException(400, "No OCR key configured on server")
 
-    files = {'file': (file.filename, await file.read())}
-    data = {'apikey': OCR_API_KEY, 'language': 'eng', 'scale': 'true', 'OCREngine': '2'}
-    resp = requests.post("https://api.ocr.space/parse/image", files=files, data=data, timeout=90)
-    if resp.status_code != 200:
-        raise HTTPException(502, f"OCR provider error {resp.status_code}")
-    payload = resp.json()
-    if not payload.get("ParsedResults"):
+    if not text.strip():
         raise HTTPException(400, "No text detected")
 
-    raw_text = "\n".join([p.get("ParsedText","") for p in payload["ParsedResults"]])
-    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
-
+    # parse lines
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     items = db.query(Item).filter(Item.active==True).all()
     parsed = []
     for ln in lines:
@@ -482,7 +511,9 @@ async def ocr_invoice(
             })
 
     if not parsed:
-        raise HTTPException(400, "No text detected")
+        # still return raw lines so UI can see something
+        return {"lines": [{"text": ln, "item_id": None, "name": "", "storage_area": None, "qty": 0.0, "unit_price": 0.0} for ln in lines[:50]]}
+
     return {"lines": parsed}
 
 @app.post("/receive/ocr", dependencies=[Depends(require_role_or_admin_key(["admin","manager"]))])
@@ -496,7 +527,6 @@ def receive_from_ocr(payload: ReceiveOCRIn, db: Session = Depends(get_db)):
             qty=float(ln.get("qty") or 0),
             unit_price=float(ln.get("unit_price") or 0),
         ))
-        # update last price on item
         it = db.query(Item).get(int(ln["item_id"]))
         if it and (ln.get("unit_price") is not None):
             it.inv_unit_price = float(ln["unit_price"])
