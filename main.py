@@ -8,7 +8,7 @@ from fastapi import (
     FastAPI, UploadFile, File, HTTPException, Header, Depends, Query, APIRouter, Body
 )
 from fastapi.middleware.cors import CORSMiddleware
-
+app = FastAPI(title="TOS Inventory API", version="3.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
