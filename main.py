@@ -532,3 +532,4 @@ def receive_from_ocr(payload: ReceiveOCRIn, db: Session = Depends(get_db)):
             it.inv_unit_price = float(ln["unit_price"])
     db.commit()
     return {"ok": True, "receipt_id": r.id}
+    
