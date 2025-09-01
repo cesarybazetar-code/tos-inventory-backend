@@ -8,6 +8,18 @@ from fastapi import (
     FastAPI, UploadFile, File, HTTPException, Header, Depends, Query, APIRouter, Body
 )
 from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "https://tos-inventory-frontend.vercel.app",  # production
+    ],
+    allow_origin_regex=r"^https://.*\.vercel\.app$",  # allow all Vercel previews
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
