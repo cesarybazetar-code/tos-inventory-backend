@@ -20,6 +20,11 @@ from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
 # -------------------- CONFIG --------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tos.db")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+
 ADMIN_KEY = os.getenv("ADMIN_KEY")                   # optional "master" header for bootstrap/admin
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me")    # set a long random value in Render
 ALGORITHM = "HS256"
