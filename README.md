@@ -9,8 +9,10 @@ pip install -r requirements.txt
 ```
 Start:
 ```
-uvicorn main:app --host 0.0.0.0 --port 10000
+uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 Env Vars:
 - DATABASE_URL=sqlite:///./tos.db
-- ADMIN_KEY=your-secret-key
+- SECRET_KEY=change-me
+- DATABASE_URL=postgres://... (prod)
+- (optional) ACCESS_TOKEN_EXPIRE_MINUTES=60

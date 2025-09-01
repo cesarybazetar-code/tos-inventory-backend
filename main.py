@@ -100,7 +100,10 @@ app = FastAPI(title="TOS Inventory API", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],            # lock down later to your frontend domain if you want
+    allow_origins=[
+        "https://tos-inventory-frontend.vercel.app",
+        "http://localhost:5173"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -272,6 +275,11 @@ app.include_router(admin_router)
 @app.on_event("startup")
 def startup_event():
     create_db()
+
+
+@app.get("/")
+def root():
+    return {"service": "tos-inventory-backend", "ok": True}
 
 @app.get("/health")
 def health():
