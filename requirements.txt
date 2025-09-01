@@ -1,9 +1,8 @@
-uvicorn[standard]
-fastapi
-sqlalchemy
-pydantic
-python-multipart
-requests
-Pillow
-passlib[bcrypt]
-python-jose[cryptography]
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+sqlalchemy==2.0.43
+pydantic==2.11.7
+python-multipart==0.0.20
+requests==2.32.5
+passlib[bcrypt]==1.7.4
+python-jose==3.3.0
