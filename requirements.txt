@@ -1,13 +1,8 @@
-fastapi==0.111.1
-uvicorn[standard]==0.30.3
-sqlalchemy==2.0.32
-pydantic==2.7.4
-python-multipart==0.0.9
-requests==2.32.3
-
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+sqlalchemy==2.0.43
+pydantic==2.11.7
+python-multipart==0.0.20
+requests==2.32.5
 passlib[bcrypt]==1.7.4
-bcrypt==3.2.0
 python-jose==3.3.0
-
-# Si usas Postgres en Render, añade esta línea (si no, quítala)
-psycopg2-binary==2.9.9
