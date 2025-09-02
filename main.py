@@ -5,6 +5,35 @@ from typing import Optional, List, Dict
 
 import requests
 from fastapi import (
+
+
+def compute_per_unit_price(
+    inv_unit_price: float | None,
+    price_basis: str | None,
+    order_unit_price: float | None,
+    case_size: float | None,
+    conversion: float | None,
+    order_unit: str | None,
+) -> tuple[float | None, str]:
+    def is_case_like(s: str | None) -> bool:
+        if not s: return False
+        s = s.lower()
+        return any(k in s for k in ("case", "cs", "box", "pack"))
+    # explicit per-unit
+    if price_basis == "per_unit" and (inv_unit_price or 0) > 0:
+        return inv_unit_price, "per_unit (direct)"
+    # have order price
+    if (order_unit_price or 0) > 0:
+        if (conversion or 0) > 0:
+            return order_unit_price / conversion, f"via_conversion ({conversion})"
+        if (case_size or 0) > 0 and is_case_like(order_unit):
+            return order_unit_price / case_size, f"via_case_size ({case_size})"
+        return order_unit_price, "order_price_assumed_per_unit"
+    # fallback
+    if (inv_unit_price or 0) > 0:
+        return inv_unit_price, "fallback_inv_unit_price"
+    return None, "no_price"
+
     FastAPI, UploadFile, File, HTTPException, Header, Depends, Query, APIRouter, Body
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,20 +88,14 @@ class Item(Base):
     name = Column(String, nullable=False)
     storage_area = Column(String, nullable=True)
     par = Column(Float, default=0.0)
-    inv_unit_price = Column(Float, default=0.0)
-    active = Column(Boolean, default=True)
-    __table_args__ = (UniqueConstraint("name", "storage_area", name="uix_item_name_area"),)
-
-class Count(Base):
-    __tablename__ = "counts"
-    id = Column(Integer, primary_key=True, index=True)
-    count_date = Column(Date, nullable=False, default=date.today)
-    storage_area = Column(String, nullable=True)
-
-class CountLine(Base):
-    __tablename__ = "count_lines"
-    id = Column(Integer, primary_key=True, index=True)
-    count_id = Column(Integer, ForeignKey("counts.id", ondelete="CASCADE"))
+    \1
+    # NEW: purchase/packaging metadata
+    order_unit = Column(String, nullable=True)
+    inventory_unit = Column(String, nullable=True)
+    case_size = Column(Float, nullable=True)
+    conversion = Column(Float, nullable=True)
+    order_unit_price = Column(Float, nullable=True)
+    price_basis = Column(String, nullable=True)
     item_id = Column(Integer, ForeignKey("items.id", ondelete="SET NULL"))
     qty = Column(Float, default=0.0)
 
