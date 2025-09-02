@@ -334,7 +334,7 @@ def migrate_items(db: Session = Depends(get_db)):
     ALTER TABLE items ADD COLUMN IF NOT EXISTS price_basis TEXT;
     """
     try:
-        db.execute(sql)
+        db.execute(text(sql))
         db.commit()
         return {"status": "ok", "message": "Migration complete"}
     except Exception as e:
