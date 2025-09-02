@@ -281,7 +281,36 @@ def update_user(user_id: int, payload: UpdateUserIn, db: Session = Depends(get_d
     db.commit(); db.refresh(u)
     return u
 
-app.include_router(admin_router)
+    db.commit(); db.refresh(u)
+    return u
+
+
+# 🔹 RESET ENDPOINT — add this block before include_router
+@admin_router.delete("/reset")
+def reset_data(
+    targets: Dict[str, bool] = Body(..., example={"items": True, "counts": True, "users": False}),
+    db: Session = Depends(get_db)
+):
+    deleted = {}
+
+    if targets.get("counts"):
+        db.query(CountLine).delete()
+        db.query(Count).delete()
+        deleted["counts"] = True
+
+    if targets.get("items"):
+        db.query(Item).delete()
+        deleted["items"] = True
+
+    if targets.get("users"):
+        db.query(User).delete()
+        deleted["users"] = True
+
+    db.commit()
+    return {"message": "Reset complete", "deleted": deleted}
+
+
+app.include_router(admin_router)   # ⬅️ leave this here
 
 # -------------------- INVENTORY ROUTES --------------------
 @app.on_event("startup")
