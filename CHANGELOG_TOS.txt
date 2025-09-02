@@ -1,0 +1,12 @@
+# TOS Inventory - Mobile + Toast CSV Upgrade (2025-09-02)
+## Frontend
+- Settings → Import: added **Import Type** (Catalog, Sales, Labor, PMix). Posts to `/import/<type>`.
+- Mobile CSS: single-column forms on phones, horizontal-scroll tables, bigger tap targets, sticky tab bar.
+
+## Backend
+- Added SQLAlchemy models: `SalesRecord`, `LaborRecord`, `PmixRecord`.
+- New CSV endpoints (admin/manager): 
+  - `POST /import/sales`
+  - `POST /import/labor`
+  - `POST /import/pmix`
+- CSV headers auto-mapped for typical Toast exports (Date, Menu Item, Qty, Net Sales, etc.).
