@@ -15,7 +15,7 @@ app.add_middleware(
         "http://localhost:5173",
         "https://tos-inventory-frontend.vercel.app",  # production
     ],
-    allow_origin_regex=r"^https://.*\.vercel\.app$",  # allow all Vercel previews
+    allow_origin_regex=["*"], # r"^https://.*\.vercel\.app$",  # allow all Vercel previews
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
