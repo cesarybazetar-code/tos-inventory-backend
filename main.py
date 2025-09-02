@@ -4,38 +4,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict
 
 import requests
-from fastapi import (
-
-
-def compute_per_unit_price(
-    inv_unit_price: float | None,
-    price_basis: str | None,
-    order_unit_price: float | None,
-    case_size: float | None,
-    conversion: float | None,
-    order_unit: str | None,
-) -> tuple[float | None, str]:
-    def is_case_like(s: str | None) -> bool:
-        if not s: return False
-        s = s.lower()
-        return any(k in s for k in ("case", "cs", "box", "pack"))
-    # explicit per-unit
-    if price_basis == "per_unit" and (inv_unit_price or 0) > 0:
-        return inv_unit_price, "per_unit (direct)"
-    # have order price
-    if (order_unit_price or 0) > 0:
-        if (conversion or 0) > 0:
-            return order_unit_price / conversion, f"via_conversion ({conversion})"
-        if (case_size or 0) > 0 and is_case_like(order_unit):
-            return order_unit_price / case_size, f"via_case_size ({case_size})"
-        return order_unit_price, "order_price_assumed_per_unit"
-    # fallback
-    if (inv_unit_price or 0) > 0:
-        return inv_unit_price, "fallback_inv_unit_price"
-    return None, "no_price"
-
-    FastAPI, UploadFile, File, HTTPException, Header, Depends, Query, APIRouter, Body
-)
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Depends, Query, APIRouter, Body
 from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -55,12 +24,12 @@ if DATABASE_URL.startswith("postgres://"):
 elif DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
-ADMIN_KEY = os.getenv("ADMIN_KEY")                   # optional "master" header for bootstrap/admin
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me")    # set a long random value in Render
+ADMIN_KEY = os.getenv("ADMIN_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24                # 24h
-GCV_API_KEY = os.getenv("GCV_API_KEY")               # Google Cloud Vision API key (recommended)
-OCR_API_KEY = os.getenv("OCR_API_KEY")               # OCR.space fallback (optional)
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+GCV_API_KEY = os.getenv("GCV_API_KEY")
+OCR_API_KEY = os.getenv("OCR_API_KEY")
 
 engine = create_engine(
     DATABASE_URL,
@@ -79,7 +48,7 @@ class User(Base):
     email = Column(String, unique=True, nullable=False, index=True)
     name = Column(String, nullable=True)
     hashed_password = Column(String, nullable=False)
-    role = Column(String, default="viewer")  # roles: admin, manager, counter, viewer
+    role = Column(String, default="viewer")  # admin, manager, counter, viewer
     active = Column(Boolean, default=True)
 
 class Item(Base):
@@ -88,18 +57,29 @@ class Item(Base):
     name = Column(String, nullable=False)
     storage_area = Column(String, nullable=True)
     par = Column(Float, default=0.0)
-    \1
+    inv_unit_price = Column(Float, default=0.0)
+    active = Column(Boolean, default=True)
     # NEW: purchase/packaging metadata
-    order_unit = Column(String, nullable=True)
-    inventory_unit = Column(String, nullable=True)
-    case_size = Column(Float, nullable=True)
-    conversion = Column(Float, nullable=True)
-    order_unit_price = Column(Float, nullable=True)
-    price_basis = Column(String, nullable=True)
+    order_unit = Column(String, nullable=True)           # e.g., 'case'
+    inventory_unit = Column(String, nullable=True)       # e.g., 'lb', 'ea', 'gal'
+    case_size = Column(Float, nullable=True)             # units per case
+    conversion = Column(Float, nullable=True)            # units per order unit (generic)
+    order_unit_price = Column(Float, nullable=True)      # price of the order unit
+    price_basis = Column(String, nullable=True)          # 'per_unit' | 'per_case' | 'via_conversion'
+
+class Count(Base):
+    __tablename__ = "counts"
+    id = Column(Integer, primary_key=True, index=True)
+    count_date = Column(Date, default=date.today, index=True)
+    storage_area = Column(String, nullable=True)
+    lines = relationship("CountLine", backref="count", cascade="all, delete-orphan")
+
+class CountLine(Base):
+    __tablename__ = "count_lines"
+    id = Column(Integer, primary_key=True, index=True)
+    count_id = Column(Integer, ForeignKey("counts.id", ondelete="CASCADE"))
     item_id = Column(Integer, ForeignKey("items.id", ondelete="SET NULL"))
     qty = Column(Float, default=0.0)
-
-    count = relationship("Count", backref="lines")
     item = relationship("Item")
 
 class Receipt(Base):
@@ -119,27 +99,52 @@ class ReceiptLine(Base):
 def create_db():
     Base.metadata.create_all(bind=engine)
 
-# -------------------- APP (single instance) --------------------
+# -------------------- APP --------------------
 app = FastAPI(title="TOS Inventory API", version="3.1.0")
 
-# CORS: allow localhost + ALL vercel.app previews + production domain
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "https://tos-inventory-frontend.vercel.app",  # production
+        "https://tos-inventory-frontend.vercel.app",
     ],
-    allow_origin_regex=r"^https://.*\.vercel\.app$",  # any Vercel preview
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
 def get_db():
     db = SessionLocal()
-    try: yield db
-    finally: db.close()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# -------------------- PRICE HELPER --------------------
+def compute_per_unit_price(
+    inv_unit_price: float | None,
+    price_basis: str | None,
+    order_unit_price: float | None,
+    case_size: float | None,
+    conversion: float | None,
+    order_unit: str | None,
+) -> tuple[float | None, str]:
+    def is_case_like(s: str | None) -> bool:
+        if not s: return False
+        s = s.lower()
+        return any(k in s for k in ("case", "cs", "box", "pack"))
+    if price_basis == "per_unit" and (inv_unit_price or 0) > 0:
+        return inv_unit_price, "per_unit (direct)"
+    if (order_unit_price or 0) > 0:
+        if (conversion or 0) > 0:
+            return order_unit_price / conversion, f"via_conversion ({conversion})"
+        if (case_size or 0) > 0 and is_case_like(order_unit):
+            return order_unit_price / case_size, f"via_case_size ({case_size})"
+        return order_unit_price, "order_price_assumed_per_unit"
+    if (inv_unit_price or 0) > 0:
+        return inv_unit_price, "fallback_inv_unit_price"
+    return None, "no_price"
 
 # -------------------- AUTH HELPERS --------------------
 def get_password_hash(password: str) -> str:
@@ -155,7 +160,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def get_user_optional(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> Optional[User]:
-    """Return user from Bearer token if present; else None (x-admin-key can still work)."""
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
     token = authorization.split(" ", 1)[1].strip()
@@ -168,7 +172,6 @@ def get_user_optional(authorization: Optional[str] = Header(None), db: Session =
         return None
 
 def require_role_or_admin_key(allowed_roles: List[str]):
-    """Allow if (Bearer user has allowed role) OR x-admin-key matches ADMIN_KEY."""
     def checker(
         user: Optional[User] = Depends(get_user_optional),
         x_admin_key: Optional[str] = Header(None)
@@ -198,7 +201,7 @@ class RegisterIn(BaseModel):
     email: str
     password: str
     name: Optional[str] = None
-    role: str = "viewer"  # admin, manager, counter, viewer
+    role: str = "viewer"
 
 class UpdateUserIn(BaseModel):
     name: Optional[str] = None
@@ -221,6 +224,13 @@ class ItemCreate(BaseModel):
     par: Optional[float] = 0.0
     inv_unit_price: Optional[float] = 0.0
     active: Optional[bool] = True
+    # allow new fields on PUT via extra
+    order_unit: Optional[str] = None
+    inventory_unit: Optional[str] = None
+    case_size: Optional[float] = None
+    conversion: Optional[float] = None
+    order_unit_price: Optional[float] = None
+    price_basis: Optional[str] = None
 
 class CountLineIn(BaseModel):
     item_id: int
@@ -272,8 +282,9 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 
 app.include_router(auth_router)
 
-# -------------------- USER ADMIN ROUTES (admin only) --------------------
-admin_router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_role_or_admin_key(["admin"]))])
+# -------------------- ADMIN ROUTES --------------------
+admin_router = APIRouter(prefix="/admin", tags=["admin"],
+    dependencies=[Depends(require_role_or_admin_key(["admin"]))])
 
 @admin_router.get("/users", response_model=List[UserOut])
 def list_users(db: Session = Depends(get_db)):
@@ -283,24 +294,17 @@ def list_users(db: Session = Depends(get_db)):
 def update_user(user_id: int, payload: UpdateUserIn, db: Session = Depends(get_db)):
     u = db.query(User).get(user_id)
     if not u: raise HTTPException(404, "User not found")
-    if payload.name is not None:
-        u.name = payload.name
+    if payload.name is not None: u.name = payload.name
     if payload.role is not None:
         if payload.role not in ("admin", "manager", "counter", "viewer"):
             raise HTTPException(400, "Invalid role")
         u.role = payload.role
-    if payload.active is not None:
-        u.active = bool(payload.active)
-    if payload.new_password:
-        u.hashed_password = get_password_hash(payload.new_password)
-    db.commit(); db.refresh(u)
-    return u
-# --- Reset endpoint ---
-from pydantic import BaseModel
-from fastapi import Body
+    if payload.active is not None: u.active = bool(payload.active)
+    if payload.new_password: u.hashed_password = get_password_hash(payload.new_password)
+    db.commit(); db.refresh(u); return u
 
 class ResetIn(BaseModel):
-    targets: list[str]
+    targets: List[str]
 
 @admin_router.delete("/reset")
 def reset_data(payload: ResetIn = Body(...), db: Session = Depends(get_db)):
@@ -308,54 +312,18 @@ def reset_data(payload: ResetIn = Body(...), db: Session = Depends(get_db)):
     targets = set([t.lower() for t in (payload.targets or [])]) & allowed
     if not targets:
         raise HTTPException(400, "Specify at least one of: items, counts, users")
-
     if "counts" in targets:
         db.query(CountLine).delete(synchronize_session=False)
         db.query(Count).delete(synchronize_session=False)
-
     if "items" in targets:
         db.query(Item).delete(synchronize_session=False)
-
     if "users" in targets:
         db.query(User).delete(synchronize_session=False)
-
     db.commit()
     return {"ok": True, "message": f"Reset complete ({', '.join(sorted(list(targets)))})"}
-    db.commit(); db.refresh(u)
-    return u
 
-
-# 🔹 RESET ENDPOINT — add this block before include_router
-@admin_router.delete("/reset")
-def reset_data(
-    targets: Dict[str, bool] = Body(..., example={"items": True, "counts": True, "users": False}),
-    db: Session = Depends(get_db)
-):
-    deleted = {}
-
-    if targets.get("counts"):
-        db.query(CountLine).delete()
-        db.query(Count).delete()
-        deleted["counts"] = True
-
-    if targets.get("items"):
-        db.query(Item).delete()
-        deleted["items"] = True
-
-    if targets.get("users"):
-        db.query(User).delete()
-        deleted["users"] = True
-
-    db.commit()
-    return {"message": "Reset complete", "deleted": deleted}
-from fastapi import Depends
-from sqlalchemy.orm import Session
-from database import get_db  # adjust import if your project uses another name
-from fastapi import APIRouter
-
-router = APIRouter()
-
-@router.post("/admin/migrate-items")
+# 🔹 MIGRATION ENDPOINT (for Postman)
+@admin_router.post("/migrate-items")
 def migrate_items(db: Session = Depends(get_db)):
     sql = """
     ALTER TABLE items ADD COLUMN IF NOT EXISTS order_unit TEXT;
@@ -373,14 +341,14 @@ def migrate_items(db: Session = Depends(get_db)):
         db.rollback()
         return {"status": "error", "detail": str(e)}
 
-app.include_router(admin_router)   # ⬅️ leave this here
+app.include_router(admin_router)
 
-# -------------------- INVENTORY ROUTES --------------------
+# -------------------- STARTUP --------------------
 @app.on_event("startup")
 def startup_event():
     create_db()
 
-
+# -------------------- CORE ROUTES --------------------
 @app.get("/")
 def root():
     return {"service": "tos-inventory-backend", "ok": True}
@@ -409,17 +377,36 @@ def create_item(payload: ItemCreate, db: Session = Depends(get_db)):
     area = payload.storage_area or None
     exists = db.query(Item).filter(Item.name == name, Item.storage_area == area).first()
     if exists:
-        # upsert behavior
         exists.par = payload.par if payload.par is not None else (exists.par or 0.0)
-        exists.inv_unit_price = payload.inv_unit_price if payload.inv_unit_price is not None else (exists.inv_unit_price or 0.0)
-        exists.active = bool(payload.active) if payload.active is not None else True
+        # compute / update price if info provided
+        per_unit, _ = compute_per_unit_price(
+            payload.inv_unit_price, payload.price_basis, payload.order_unit_price,
+            payload.case_size, payload.conversion, payload.order_unit
+        )
+        if per_unit is not None:
+            exists.inv_unit_price = per_unit
+        if payload.active is not None:
+            exists.active = bool(payload.active)
+        # metadata
+        for fld in ("order_unit","inventory_unit","case_size","conversion","order_unit_price","price_basis"):
+            val = getattr(payload, fld)
+            if val is not None:
+                setattr(exists, fld, val)
         db.commit(); db.refresh(exists)
         return exists
+
+    per_unit, _ = compute_per_unit_price(
+        payload.inv_unit_price, payload.price_basis, payload.order_unit_price,
+        payload.case_size, payload.conversion, payload.order_unit
+    )
     rec = Item(
         name=name, storage_area=area,
         par=payload.par or 0.0,
-        inv_unit_price=payload.inv_unit_price or 0.0,
-        active=bool(payload.active) if payload.active is not None else True
+        inv_unit_price=(per_unit or 0.0),
+        active=bool(payload.active) if payload.active is not None else True,
+        order_unit=payload.order_unit, inventory_unit=payload.inventory_unit,
+        case_size=payload.case_size, conversion=payload.conversion,
+        order_unit_price=payload.order_unit_price, price_basis=payload.price_basis,
     )
     db.add(rec); db.commit(); db.refresh(rec)
     return rec
@@ -430,8 +417,10 @@ def update_item(item_id: int, payload: ItemCreate, db: Session = Depends(get_db)
     rec = db.query(Item).get(item_id)
     if not rec:
         raise HTTPException(404, "Not found")
+
     if payload.name and payload.name.strip() != rec.name:
         rec.name = payload.name.strip()
+
     new_area = payload.storage_area if payload.storage_area is not None else rec.storage_area
     if new_area != rec.storage_area:
         conflict = db.query(Item).filter(
@@ -440,12 +429,29 @@ def update_item(item_id: int, payload: ItemCreate, db: Session = Depends(get_db)
         if conflict:
             raise HTTPException(400, "Item with same name exists in that area")
         rec.storage_area = new_area
+
     if payload.par is not None:
         rec.par = payload.par or 0.0
-    if payload.inv_unit_price is not None:
+
+    # update metadata first
+    for fld in ("order_unit","inventory_unit","case_size","conversion","order_unit_price","price_basis"):
+        val = getattr(payload, fld)
+        if val is not None:
+            setattr(rec, fld, val)
+
+    # recompute per-unit if enough info was sent
+    per_unit, _ = compute_per_unit_price(
+        payload.inv_unit_price, payload.price_basis, payload.order_unit_price,
+        payload.case_size, payload.conversion, payload.order_unit
+    )
+    if per_unit is not None:
+        rec.inv_unit_price = per_unit
+    elif payload.inv_unit_price is not None:
         rec.inv_unit_price = payload.inv_unit_price or 0.0
+
     if payload.active is not None:
         rec.active = bool(payload.active)
+
     db.commit(); db.refresh(rec)
     return rec
 
@@ -466,29 +472,54 @@ async def import_catalog(file: UploadFile = File(...), db: Session = Depends(get
     content = await file.read()
     reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
     created = 0; updated = 0
+    def _f(v, default=0.0):
+        try: 
+            s = str(v).replace(',', '').replace('$','').strip()
+            return float(s) if s else default
+        except: 
+            return default
     for row in reader:
         name = (row.get("name") or row.get("Item") or "").strip()
-        if not name:
-            continue
+        if not name: continue
         storage = (row.get("storage_area") or row.get("Location") or None) or None
-        def to_float(v, default=0.0):
-            try: return float(v)
-            except: return default
-        par = to_float(row.get("par") or row.get("PAR"))
-        price = to_float(row.get("inv_unit_price") or row.get("Inv Unit Price") or row.get("Order Unit Price"))
+        par = _f(row.get("par") or row.get("PAR"))
+        inv_unit_price = _f(row.get("inv_unit_price"))
+        order_unit_price = _f(row.get("order_unit_price"))
+        case_size = _f(row.get("case_size"), None)
+        conversion = _f(row.get("conversion"), None)
+        inventory_unit = (row.get("inventory_unit") or row.get("Unit") or None)
+        order_unit = (row.get("order_unit") or None)
+        price_basis = (row.get("price_basis") or None)
+
+        per_unit, _ = compute_per_unit_price(
+            inv_unit_price, price_basis, order_unit_price, case_size, conversion, order_unit
+        )
+
         exists = db.query(Item).filter(Item.name==name, Item.storage_area==storage).first()
         if exists:
             exists.par = par if par is not None else exists.par
-            exists.inv_unit_price = price if price is not None else exists.inv_unit_price
+            if per_unit is not None: exists.inv_unit_price = per_unit
+            exists.inventory_unit = inventory_unit or exists.inventory_unit
+            exists.order_unit = order_unit or exists.order_unit
+            if case_size is not None: exists.case_size = case_size
+            if conversion is not None: exists.conversion = conversion
+            if order_unit_price is not None: exists.order_unit_price = order_unit_price
+            if price_basis is not None: exists.price_basis = price_basis
             exists.active = True
             updated += 1
         else:
-            db.add(Item(name=name, storage_area=storage, par=par or 0.0,
-                        inv_unit_price=price or 0.0, active=True))
+            db.add(Item(
+                name=name, storage_area=storage, par=par or 0.0,
+                inv_unit_price=(per_unit or 0.0), active=True,
+                inventory_unit=inventory_unit, order_unit=order_unit,
+                case_size=case_size, conversion=conversion,
+                order_unit_price=order_unit_price, price_basis=price_basis
+            ))
             created += 1
     db.commit()
     return {"created": created, "updated": updated}
 
+# -------------------- COUNTS & AUTO-PO --------------------
 @app.get("/counts", response_model=List[CountOut])
 def list_counts(db: Session = Depends(get_db)):
     res: List[CountOut] = []
@@ -538,7 +569,7 @@ def auto_po(storage_area: Optional[str] = None, db: Session = Depends(get_db)):
             })
     return {"storage_area": storage_area, "lines": out}
 
-# -------------------- OCR ROUTES --------------------
+# -------------------- OCR --------------------
 PRICE_RE = re.compile(r"(?<!\d)(\d{1,4}(?:\.\d{2}))")
 QTY_RE = re.compile(r"(?<!\d)(\d{1,4})(?![\d\.])")
 
@@ -602,7 +633,6 @@ async def ocr_invoice(
     if not text.strip():
         raise HTTPException(400, "No text detected")
 
-    # parse lines
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     items = db.query(Item).filter(Item.active==True).all()
     parsed = []
@@ -628,7 +658,6 @@ async def ocr_invoice(
             })
 
     if not parsed:
-        # still return raw lines so UI can see something
         return {"lines": [{"text": ln, "item_id": None, "name": "", "storage_area": None, "qty": 0.0, "unit_price": 0.0} for ln in lines[:50]]}
 
     return {"lines": parsed}
@@ -649,11 +678,8 @@ def receive_from_ocr(payload: ReceiveOCRIn, db: Session = Depends(get_db)):
             it.inv_unit_price = float(ln["unit_price"])
     db.commit()
     return {"ok": True, "receipt_id": r.id}
-    app.include_router(admin_router)
 
-
-
-# ======== NEW: Sales / Labor / PMix models ========
+# -------------------- SALES / LABOR / PMIX --------------------
 class SalesRecord(Base):
     __tablename__ = "sales_records"
     id = Column(Integer, primary_key=True)
@@ -680,13 +706,9 @@ class PmixRecord(Base):
     qty = Column(Float, default=0.0)
     net_sales = Column(Float, default=0.0)
 
-# ======== NEW: Pydantic Schemas ========
 class ImportResult(BaseModel):
     created: int
     updated: int
-
-# ======== Helpers to parse generic Toast-like CSV ========
-from datetime import datetime
 
 def _to_date(v):
     if not v: return None
@@ -726,8 +748,7 @@ async def import_sales(file: UploadFile = File(...), db: Session = Depends(get_d
         else:
             rec = SalesRecord(sale_date=d, item_name=item, qty=qty, net_sales=net, gross_sales=gross)
             db.add(rec); created += 1
-    db.commit()
-    Base.metadata.create_all(bind=engine)  # ensure tables exist
+    db.commit(); Base.metadata.create_all(bind=engine)
     return ImportResult(created=created, updated=updated)
 
 @app.post("/import/labor", response_model=ImportResult,
@@ -753,8 +774,7 @@ async def import_labor(file: UploadFile = File(...), db: Session = Depends(get_d
         else:
             rec = LaborRecord(work_date=d, employee=emp, job_title=job, hours=hours, wages=wages)
             db.add(rec); created += 1
-    db.commit()
-    Base.metadata.create_all(bind=engine)
+    db.commit(); Base.metadata.create_all(bind=engine)
     return ImportResult(created=created, updated=updated)
 
 @app.post("/import/pmix", response_model=ImportResult,
@@ -778,6 +798,5 @@ async def import_pmix(file: UploadFile = File(...), db: Session = Depends(get_db
         else:
             rec = PmixRecord(sale_date=d, item_name=item, qty=qty, net_sales=net)
             db.add(rec); created += 1
-    db.commit()
-    Base.metadata.create_all(bind=engine)
+    db.commit(); Base.metadata.create_all(bind=engine)
     return ImportResult(created=created, updated=updated)
