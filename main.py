@@ -6,7 +6,7 @@ from typing import Optional, List, Dict
 import requests
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Depends, Query, APIRouter, Body
 from fastapi.middleware.cors import CORSMiddleware
-
+from sqlalchemy import text
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
