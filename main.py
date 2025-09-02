@@ -272,7 +272,32 @@ def update_user(user_id: int, payload: UpdateUserIn, db: Session = Depends(get_d
         u.hashed_password = get_password_hash(payload.new_password)
     db.commit(); db.refresh(u)
     return u
+# --- Reset endpoint ---
+from pydantic import BaseModel
+from fastapi import Body
 
+class ResetIn(BaseModel):
+    targets: list[str]
+
+@admin_router.delete("/reset")
+def reset_data(payload: ResetIn = Body(...), db: Session = Depends(get_db)):
+    allowed = {"items", "counts", "users"}
+    targets = set([t.lower() for t in (payload.targets or [])]) & allowed
+    if not targets:
+        raise HTTPException(400, "Specify at least one of: items, counts, users")
+
+    if "counts" in targets:
+        db.query(CountLine).delete(synchronize_session=False)
+        db.query(Count).delete(synchronize_session=False)
+
+    if "items" in targets:
+        db.query(Item).delete(synchronize_session=False)
+
+    if "users" in targets:
+        db.query(User).delete(synchronize_session=False)
+
+    db.commit()
+    return {"ok": True, "message": f"Reset complete ({', '.join(sorted(list(targets)))})"}
     db.commit(); db.refresh(u)
     return u
 
@@ -578,4 +603,4 @@ def receive_from_ocr(payload: ReceiveOCRIn, db: Session = Depends(get_db)):
             it.inv_unit_price = float(ln["unit_price"])
     db.commit()
     return {"ok": True, "receipt_id": r.id}
-    
+    app.include_router(admin_router)
