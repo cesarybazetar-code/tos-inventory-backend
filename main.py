@@ -348,7 +348,30 @@ def reset_data(
 
     db.commit()
     return {"message": "Reset complete", "deleted": deleted}
+from fastapi import Depends
+from sqlalchemy.orm import Session
+from database import get_db  # adjust import if your project uses another name
+from fastapi import APIRouter
 
+router = APIRouter()
+
+@router.post("/admin/migrate-items")
+def migrate_items(db: Session = Depends(get_db)):
+    sql = """
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS order_unit TEXT;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS inventory_unit TEXT;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS case_size DOUBLE PRECISION;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS conversion DOUBLE PRECISION;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS order_unit_price DOUBLE PRECISION;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS price_basis TEXT;
+    """
+    try:
+        db.execute(sql)
+        db.commit()
+        return {"status": "ok", "message": "Migration complete"}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "detail": str(e)}
 
 app.include_router(admin_router)   # ⬅️ leave this here
 
