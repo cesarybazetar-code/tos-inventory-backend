@@ -8,18 +8,7 @@ from fastapi import (
     FastAPI, UploadFile, File, HTTPException, Header, Depends, Query, APIRouter, Body
 )
 from fastapi.middleware.cors import CORSMiddleware
-app = FastAPI(title="TOS Inventory API", version="3.1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://tos-inventory-frontend.vercel.app",  # production
-    ],
-    allow_origin_regex=["*"], # r"^https://.*\.vercel\.app$",  # allow all Vercel previews
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -107,19 +96,22 @@ class ReceiptLine(Base):
 def create_db():
     Base.metadata.create_all(bind=engine)
 
-# -------------------- APP --------------------
+# -------------------- APP (single instance) --------------------
 app = FastAPI(title="TOS Inventory API", version="3.1.0")
 
+# CORS: allow localhost + ALL vercel.app previews + production domain
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://tos-inventory-frontend.vercel.app",
-        "http://localhost:5173"
+        "http://localhost:5173",
+        "https://tos-inventory-frontend.vercel.app",  # production
     ],
+    allow_origin_regex=r"^https://.*\.vercel\.app$",  # any Vercel preview
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 def get_db():
     db = SessionLocal()
