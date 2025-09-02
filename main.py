@@ -604,3 +604,134 @@ def receive_from_ocr(payload: ReceiveOCRIn, db: Session = Depends(get_db)):
     db.commit()
     return {"ok": True, "receipt_id": r.id}
     app.include_router(admin_router)
+
+
+
+# ======== NEW: Sales / Labor / PMix models ========
+class SalesRecord(Base):
+    __tablename__ = "sales_records"
+    id = Column(Integer, primary_key=True)
+    sale_date = Column(Date, index=True)
+    item_name = Column(String, index=True)
+    qty = Column(Float, default=0.0)
+    net_sales = Column(Float, default=0.0)
+    gross_sales = Column(Float, default=0.0)
+
+class LaborRecord(Base):
+    __tablename__ = "labor_records"
+    id = Column(Integer, primary_key=True)
+    work_date = Column(Date, index=True)
+    employee = Column(String, index=True)
+    job_title = Column(String, nullable=True)
+    hours = Column(Float, default=0.0)
+    wages = Column(Float, default=0.0)
+
+class PmixRecord(Base):
+    __tablename__ = "pmix_records"
+    id = Column(Integer, primary_key=True)
+    sale_date = Column(Date, index=True)
+    item_name = Column(String, index=True)
+    qty = Column(Float, default=0.0)
+    net_sales = Column(Float, default=0.0)
+
+# ======== NEW: Pydantic Schemas ========
+class ImportResult(BaseModel):
+    created: int
+    updated: int
+
+# ======== Helpers to parse generic Toast-like CSV ========
+from datetime import datetime
+
+def _to_date(v):
+    if not v: return None
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        try: return datetime.strptime(v.strip(), fmt).date()
+        except: pass
+    return None
+
+def _to_float(v, default=0.0):
+    try:
+        if v is None: return default
+        s = str(v).replace(',', '').replace('$','').strip()
+        return float(s) if s else default
+    except:
+        return default
+
+@app.post("/import/sales", response_model=ImportResult,
+          dependencies=[Depends(require_role_or_admin_key(["admin", "manager"]))])
+async def import_sales(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(400, "Upload a CSV")
+    content = await file.read()
+    reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
+    created = updated = 0
+    for row in reader:
+        d = _to_date(row.get("Date") or row.get("Business Date") or row.get("sale_date"))
+        item = (row.get("Menu Item") or row.get("Item") or row.get("item_name") or "").strip()
+        if not d or not item: 
+            continue
+        qty = _to_float(row.get("Qty") or row.get("Quantity") or row.get("qty"), 0.0)
+        net = _to_float(row.get("Net Sales") or row.get("Net") or row.get("net_sales"), 0.0)
+        gross = _to_float(row.get("Gross Sales") or row.get("Gross") or row.get("gross_sales"), 0.0)
+
+        rec = db.query(SalesRecord).filter(SalesRecord.sale_date==d, SalesRecord.item_name==item).first()
+        if rec:
+            rec.qty = qty; rec.net_sales = net; rec.gross_sales = gross; updated += 1
+        else:
+            rec = SalesRecord(sale_date=d, item_name=item, qty=qty, net_sales=net, gross_sales=gross)
+            db.add(rec); created += 1
+    db.commit()
+    Base.metadata.create_all(bind=engine)  # ensure tables exist
+    return ImportResult(created=created, updated=updated)
+
+@app.post("/import/labor", response_model=ImportResult,
+          dependencies=[Depends(require_role_or_admin_key(["admin", "manager"]))])
+async def import_labor(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(400, "Upload a CSV")
+    content = await file.read()
+    reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
+    created = updated = 0
+    for row in reader:
+        d = _to_date(row.get("Date") or row.get("Business Date") or row.get("work_date"))
+        emp = (row.get("Employee") or row.get("Name") or row.get("employee") or "").strip()
+        if not d or not emp: 
+            continue
+        job = (row.get("Job") or row.get("Job Title") or row.get("job_title") or None)
+        hours = _to_float(row.get("Hours") or row.get("Total Hours") or row.get("hours"), 0.0)
+        wages = _to_float(row.get("Wages") or row.get("Total Wages") or row.get("wages"), 0.0)
+
+        rec = db.query(LaborRecord).filter(LaborRecord.work_date==d, LaborRecord.employee==emp, LaborRecord.job_title==job).first()
+        if rec:
+            rec.hours = hours; rec.wages = wages; updated += 1
+        else:
+            rec = LaborRecord(work_date=d, employee=emp, job_title=job, hours=hours, wages=wages)
+            db.add(rec); created += 1
+    db.commit()
+    Base.metadata.create_all(bind=engine)
+    return ImportResult(created=created, updated=updated)
+
+@app.post("/import/pmix", response_model=ImportResult,
+          dependencies=[Depends(require_role_or_admin_key(["admin", "manager"]))])
+async def import_pmix(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(400, "Upload a CSV")
+    content = await file.read()
+    reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
+    created = updated = 0
+    for row in reader:
+        d = _to_date(row.get("Date") or row.get("Business Date") or row.get("sale_date"))
+        item = (row.get("Menu Item") or row.get("Item") or row.get("item_name") or "").strip()
+        if not d or not item: 
+            continue
+        qty = _to_float(row.get("Qty") or row.get("Quantity") or row.get("Sold Qty") or row.get("qty"), 0.0)
+        net = _to_float(row.get("Net Sales") or row.get("Net") or row.get("net_sales"), 0.0)
+        rec = db.query(PmixRecord).filter(PmixRecord.sale_date==d, PmixRecord.item_name==item).first()
+        if rec:
+            rec.qty = qty; rec.net_sales = net; updated += 1
+        else:
+            rec = PmixRecord(sale_date=d, item_name=item, qty=qty, net_sales=net)
+            db.add(rec); created += 1
+    db.commit()
+    Base.metadata.create_all(bind=engine)
+    return ImportResult(created=created, updated=updated)
