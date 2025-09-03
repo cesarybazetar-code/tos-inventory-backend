@@ -209,6 +209,7 @@ class UpdateUserIn(BaseModel):
     active: Optional[bool] = None
     new_password: Optional[str] = None
 
+
 class ItemOut(BaseModel):
     id: int
     name: str
@@ -216,7 +217,17 @@ class ItemOut(BaseModel):
     par: float
     inv_unit_price: float
     active: bool
-    class Config: from_attributes = True
+
+    # NEW fields for units/case handling
+    order_unit: Optional[str] = None
+    inventory_unit: Optional[str] = None
+    case_size: Optional[float] = None
+    conversion: Optional[float] = None
+    order_unit_price: Optional[float] = None
+    price_basis: Optional[str] = None
+
+    class Config:
+        from_attributes = True
 
 class ItemCreate(BaseModel):
     name: str
