@@ -1,3 +1,11 @@
+
+def _parse_date(s: str|None):
+    if not s: return None
+    for fmt in ("%Y-%m-%d","%m/%d/%Y","%m/%d/%y"):
+        try: return datetime.strptime(s, fmt).date()
+        except: pass
+    return None
+from sqlalchemy import func
 # main.py
 import os, re, csv, io, base64
 from datetime import date, datetime, timedelta
@@ -214,28 +222,9 @@ class ItemOut(BaseModel):
     id: int
     name: str
     storage_area: Optional[str] = None
-    par: float
-    inv_unit_price: float
-    active: bool
-
-    # NEW fields for units/case handling
-    order_unit: Optional[str] = None
-    inventory_unit: Optional[str] = None
-    case_size: Optional[float] = None
-    conversion: Optional[float] = None
-    order_unit_price: Optional[float] = None
-    price_basis: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-class ItemCreate(BaseModel):
-    name: str
-    storage_area: Optional[str] = None
-    par: Optional[float] = 0.0
-    inv_unit_price: Optional[float] = 0.0
-    active: Optional[bool] = True
-
+    par: float = 0.0
+    inv_unit_price: float = 0.0
+    active: bool = True
     # NEW fields
     order_unit: Optional[str] = None
     inventory_unit: Optional[str] = None
@@ -243,7 +232,21 @@ class ItemCreate(BaseModel):
     conversion: Optional[float] = None
     order_unit_price: Optional[float] = None
     price_basis: Optional[str] = None
+    class Config: from_attributes = True
 
+class ItemCreate(BaseModel):
+    name: str
+    storage_area: Optional[str] = None
+    par: Optional[float] = 0.0
+    inv_unit_price: Optional[float] = 0.0
+    active: Optional[bool] = True
+    # NEW fields
+    order_unit: Optional[str] = None
+    inventory_unit: Optional[str] = None
+    case_size: Optional[float] = None
+    conversion: Optional[float] = None
+    order_unit_price: Optional[float] = None
+    price_basis: Optional[str] = None
 
 class CountLineIn(BaseModel):
     item_id: int
@@ -354,6 +357,25 @@ def migrate_items(db: Session = Depends(get_db)):
         db.rollback()
         return {"status": "error", "detail": str(e)}
 
+
+# --- Migration endpoint to add new item columns (idempotent) ---
+@admin_router.post("/migrate-items")
+def migrate_items(db: Session = Depends(get_db)):
+    sql = """
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS order_unit TEXT;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS inventory_unit TEXT;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS case_size DOUBLE PRECISION;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS conversion DOUBLE PRECISION;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS order_unit_price DOUBLE PRECISION;
+    ALTER TABLE items ADD COLUMN IF NOT EXISTS price_basis TEXT;
+    """
+    try:
+        db.execute(text(sql))
+        db.commit()
+        return {"status":"ok","message":"Migration complete"}
+    except Exception as e:
+        db.rollback()
+        return {"status":"error","detail":str(e)}
 app.include_router(admin_router)
 
 # -------------------- STARTUP --------------------
@@ -813,3 +835,107 @@ async def import_pmix(file: UploadFile = File(...), db: Session = Depends(get_db
             db.add(rec); created += 1
     db.commit(); Base.metadata.create_all(bind=engine)
     return ImportResult(created=created, updated=updated)
+
+
+# -------------------- REPORTS (Sales/Labor/PMix) --------------------
+from fastapi import Query
+
+@app.get("/reports/summary")
+def reports_summary(
+    start: str | None = Query(None, description="YYYY-MM-DD"),
+    end: str | None = Query(None, description="YYYY-MM-DD"),
+    db: Session = Depends(get_db)
+):
+    # default window: last 14 days
+    today = date.today()
+    d1 = _parse_date(start) or (today - timedelta(days=13))
+    d2 = _parse_date(end) or today
+    # inclusive range
+    # sales
+    sales_q = db.query(
+        func.coalesce(func.sum(SalesRecord.net_sales), 0.0),
+        func.coalesce(func.sum(SalesRecord.gross_sales), 0.0)
+    ).filter(SalesRecord.sale_date >= d1, SalesRecord.sale_date <= d2).one()
+    net_sales, gross_sales = float(sales_q[0]), float(sales_q[1])
+
+    # labor
+    labor_q = db.query(
+        func.coalesce(func.sum(LaborRecord.hours), 0.0),
+        func.coalesce(func.sum(LaborRecord.wages), 0.0)
+    ).filter(LaborRecord.work_date >= d1, LaborRecord.work_date <= d2).one()
+    labor_hours, labor_wages = float(labor_q[0]), float(labor_q[1])
+
+    # pmix count of items sold
+    pmix_qty = float(db.query(func.coalesce(func.sum(PmixRecord.qty), 0.0))
+                     .filter(PmixRecord.sale_date >= d1, PmixRecord.sale_date <= d2).scalar() or 0.0)
+
+    labor_pct = (labor_wages / net_sales) if net_sales > 0 else None
+
+    return {
+        "start": d1.isoformat(),
+        "end": d2.isoformat(),
+        "totals": {
+            "net_sales": net_sales,
+            "gross_sales": gross_sales,
+            "labor_hours": labor_hours,
+            "labor_wages": labor_wages,
+            "labor_pct": labor_pct,
+            "pmix_qty": pmix_qty
+        }
+    }
+
+@app.get("/reports/sales")
+def reports_sales(
+    start: str | None = Query(None), end: str | None = Query(None),
+    db: Session = Depends(get_db)
+):
+    today = date.today()
+    d1 = _parse_date(start) or (today - timedelta(days=13))
+    d2 = _parse_date(end) or today
+    rows = (db.query(SalesRecord.sale_date, func.sum(SalesRecord.net_sales), func.sum(SalesRecord.gross_sales))
+              .filter(SalesRecord.sale_date >= d1, SalesRecord.sale_date <= d2)
+              .group_by(SalesRecord.sale_date).order_by(SalesRecord.sale_date.asc()).all())
+    return [{"date": d.isoformat(), "net_sales": float(n), "gross_sales": float(g)} for d,n,g in rows]
+
+@app.get("/reports/labor")
+def reports_labor(
+    start: str | None = Query(None), end: str | None = Query(None),
+    db: Session = Depends(get_db)
+):
+    today = date.today()
+    d1 = _parse_date(start) or (today - timedelta(days=13))
+    d2 = _parse_date(end) or today
+    rows = (db.query(LaborRecord.work_date, func.sum(LaborRecord.hours), func.sum(LaborRecord.wages))
+              .filter(LaborRecord.work_date >= d1, LaborRecord.work_date <= d2)
+              .group_by(LaborRecord.work_date).order_by(LaborRecord.work_date.asc()).all())
+    out = []
+    # need net sales per day to compute labor % per day
+    sales_map = {d: float(n) for d,n,_ in
+                 db.query(SalesRecord.sale_date, func.sum(SalesRecord.net_sales), func.sum(SalesRecord.gross_sales))
+                   .filter(SalesRecord.sale_date >= d1, SalesRecord.sale_date <= d2)
+                   .group_by(SalesRecord.sale_date).all()}
+    for d, hrs, wages in rows:
+        net = sales_map.get(d, 0.0)
+        out.append({
+            "date": d.isoformat(),
+            "hours": float(hrs),
+            "wages": float(wages),
+            "labor_pct": (float(wages)/net) if net>0 else None
+        })
+    return out
+
+@app.get("/reports/pmix")
+def reports_pmix(
+    start: str | None = Query(None), end: str | None = Query(None),
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    today = date.today()
+    d1 = _parse_date(start) or (today - timedelta(days=13))
+    d2 = _parse_date(end) or today
+    rows = (db.query(PmixRecord.item_name, func.sum(PmixRecord.qty), func.sum(PmixRecord.net_sales))
+              .filter(PmixRecord.sale_date >= d1, PmixRecord.sale_date <= d2)
+              .group_by(PmixRecord.item_name)
+              .order_by(func.sum(PmixRecord.net_sales).desc())
+              .limit(limit).all())
+    return [{"item_name": n, "qty": float(q), "net_sales": float(ns)} for n,q,ns in rows]
