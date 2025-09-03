@@ -235,13 +235,15 @@ class ItemCreate(BaseModel):
     par: Optional[float] = 0.0
     inv_unit_price: Optional[float] = 0.0
     active: Optional[bool] = True
-    # allow new fields on PUT via extra
+
+    # NEW fields
     order_unit: Optional[str] = None
     inventory_unit: Optional[str] = None
     case_size: Optional[float] = None
     conversion: Optional[float] = None
     order_unit_price: Optional[float] = None
     price_basis: Optional[str] = None
+
 
 class CountLineIn(BaseModel):
     item_id: int
